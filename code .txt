@@ -1,0 +1,670 @@
+#include <iostream>
+#include <fstream>
+#include <opencv2\opencv.hpp>
+#include <opencv2\ml\ml.hpp>
+#include <opencv2\ml.hpp>
+
+
+#define MODE 3 // 0 = capture model key (r g v) , 1 = train , 2 = grap Knn , 3 = realtime
+
+//MODEL
+#define PATH_MODEL "D:\\Assignment01\\MODEL\\" //ไฟล์รูปภาพ train
+#define PATH_CSV "D:\\Assignment01\\train.csv" //ไฟล์ CSV
+
+//Cap Model ถ่ายรูปโมเดล
+#define PATH_CAP_MODEL_RED "D:\\Assignment01\\MODEL\\jellyRed_"
+#define PATH_CAP_MODEL_GREEN "D:\\Assignment01\\MODEL\\jellyGreen_"
+#define PATH_CAP_MODEL_VIOLET "D:\\Assignment01\\MODEL\\jellyViolet_"
+#define PATH_CAP_MODEL_TEST "D:\\Assignment01\\MODEL\\test\\v_"
+
+//Cap Backgroud 
+#define PATH_BG "D:\\Assignment01\\bg.jpg"
+
+using namespace std;
+
+struct objectFeatures
+{
+	double compactness;
+	double hue;
+
+	int object_type;
+};
+
+struct trainFile
+{
+	int type;
+	string filename;
+};
+
+void setupFileList(vector<trainFile> &fileList) 
+{
+	string folder = PATH_MODEL;
+	int no_jellyRed = 20;
+	int no_jellyGreen = 20;
+	int no_jellyViolet = 20;
+
+	trainFile thisFile;
+
+	for (int i = 1; i <= no_jellyRed; i++)
+	{
+		stringstream count_str;
+		count_str << setfill('0') << setw(2) << i;
+		string filename = folder + "jellyRed_" + count_str.str() + ".jpg";
+
+		thisFile.type = 1;
+		thisFile.filename = filename;
+		fileList.push_back(thisFile);
+	}
+
+	for (int i = 1; i <= no_jellyGreen; i++)
+	{
+		stringstream count_str;
+		count_str << setfill('0') << setw(2) << i;
+		string filename = folder + "jellyGreen_" + count_str.str() + ".jpg";
+
+		thisFile.type = 2;
+		thisFile.filename = filename;
+		fileList.push_back(thisFile);
+	}
+
+	for (int i = 1; i <= no_jellyViolet; i++)
+	{
+		stringstream count_str;
+		count_str << setfill('0') << setw(2) << i;
+		string filename = folder + "jellyViolet_" + count_str.str() + ".jpg";
+
+		thisFile.type = 3;
+		thisFile.filename = filename;
+		fileList.push_back(thisFile);
+	}
+
+}
+
+int findBiggestContour(vector<vector<cv::Point>> &contours)
+{
+	int index = 0;
+	int max_size = 0;
+	int size;
+	cv::Moments mu;
+
+	for (int i = 0; i < contours.size(); i++)
+	{
+		mu = moments(contours[i], true);
+		size = mu.m00;
+		if (size > max_size)
+		{
+			max_size = size;
+			index = i;
+		}
+	}
+	return index;
+}
+
+objectFeatures ComputeFeatures(cv::Mat &input)
+{
+	objectFeatures result;
+	cv::Mat gray;
+	cv::Mat binary;
+
+	//แปรงภาพเป็นภาพระดับเทา
+	cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
+
+	//แปรงภาพเป็น binary แล้วสลับค่าและใช้ otsu เพื่อแยกวัตถุ 
+	cv::threshold(gray, binary, 128, 255,
+		cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+
+	//เพิ่มลักษณะทางสัณฐานวิทยาให้กับ binary
+	cv::dilate(binary, binary, cv::Mat(), cv::Point(-1, -1));
+	cv::erode(binary, binary, cv::Mat(), cv::Point(-1, -1));
+
+	//เช็คส่วน label ของวัตถุ 
+	vector<vector<cv::Point>> contours;
+	vector<cv::Vec4i> hierarchy;
+	cv::findContours(binary, contours, hierarchy,
+		cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);//หาเส้นรอบรูปวัตถุ
+	int index_big = findBiggestContour(contours);
+
+	//หาจุดกลึ่งกลางของวัตถุ
+	cv::Moments mu;
+	cv::Point2f centroid;
+	mu = moments(contours[index_big], true);
+	centroid = cv::Point2f(mu.m10 / mu.m00, mu.m01 / mu.m00);
+
+	//หาค่าหาเป็นปึกแผ่น หรือ compactness 
+	double compactness;
+	double perimeter = cv::arcLength(contours[index_big], true);
+	compactness = (4.0*CV_PI*mu.m00) / (perimeter*perimeter);
+
+	// หาค่าเฉลี่ยของ hue จาก centroid ของวัตถุ
+	cv::Rect roi_rect;
+	roi_rect = cv::Rect(centroid.x - 5, centroid.y - 5, 10, 10);
+	cv::Mat roiRGB = input(roi_rect);
+	cv::Mat roiHSV;
+	cv::cvtColor(roiRGB, roiHSV, cv::COLOR_BGR2HSV);
+	vector<cv::Mat> imgHSV;
+	cv::split(roiHSV, imgHSV);
+	double meanHue = cv::mean(imgHSV[0])[0];
+	meanHue = meanHue / 180.0; //normalization
+
+	result.compactness = compactness;
+	result.hue = meanHue;
+
+	return result;
+}
+
+void TrainMode() //train ข้อมูลเป็นไฟล์ CSV
+{
+	vector<trainFile> trainFileList;
+	setupFileList(trainFileList);
+
+	for (int i = 0; i < trainFileList.size(); i++)
+	{
+		cout << trainFileList[i].filename << " ";
+		cout << trainFileList[i].type << endl;
+
+		cv::Mat input = cv::imread(trainFileList[i].filename);
+		// คำนวณคุณลักษณะ
+		objectFeatures thisFeature = ComputeFeatures(input);
+		thisFeature.object_type = trainFileList[i].type;
+
+		// นำข้อมูลเป็นไฟล์ CSV
+		string output_filename = PATH_CSV;
+		std::ofstream ofs(output_filename, ios::out | ios::app);
+		stringstream ss_line;
+		ss_line << thisFeature.object_type << ",";
+		ss_line << thisFeature.hue << ",";
+		ss_line << thisFeature.compactness << endl;//01
+		string line = ss_line.str();
+		ofs << line;
+		ofs.close();
+	}
+}
+
+void extractFeatures(string input, objectFeatures &feature)
+{
+	std::stringstream strs;
+	strs << input;
+
+	string str_type;
+	std::getline(strs, str_type, ',');
+	feature.object_type = atoi(str_type.c_str());
+
+	string str_meanHue;
+	std::getline(strs, str_meanHue, ',');
+	feature.hue = atof(str_meanHue.c_str());
+
+	string str_compact;
+	std::getline(strs, str_compact, ',');
+	feature.compactness = atof(str_compact.c_str());
+}
+
+
+string test_img(cv::Mat img) {
+	string input_filename = PATH_CSV;
+
+	std::ifstream openfile(input_filename, ios::in);
+	if (!openfile) //Always test the file open.
+	{
+		cout << "Error opening output file" << endl;
+		system("pause");
+	}
+	else
+	{
+		cout << "Running ..." << endl;
+	}
+
+	string line;
+	vector<objectFeatures> TrainFeatures;	// features
+	while (!openfile.eof())
+	{
+		std::getline(openfile, line);
+		objectFeatures thisFeature;
+		extractFeatures(line, thisFeature);
+		TrainFeatures.push_back(thisFeature);
+	}
+
+	cv::Mat trainData(TrainFeatures.size(), 2, CV_32FC1);
+	cv::Mat trainClasses(TrainFeatures.size(), 1, CV_32FC1);
+
+
+
+	for (int i = 0; i < TrainFeatures.size(); i++)
+	{
+		trainData.at<float>(i, 0) = TrainFeatures[i].hue;
+		trainData.at<float>(i, 1) = TrainFeatures[i].compactness;//3
+
+		trainClasses.at<float>(i, 0) = TrainFeatures[i].object_type;
+	}
+
+
+
+	cv::Ptr<cv::ml::TrainData> tdata;
+	tdata->create;
+	tdata = cv::ml::TrainData::loadFromCSV(PATH_CSV,0, 0, 1);
+
+
+	int K = 5;
+	cv::Mat result(1, 1, CV_32FC1);
+	cv::Mat neighbor(1, 5, CV_32FC1);
+	cv::Mat dist(1, 5, CV_32FC1);
+
+
+	cv::Ptr<cv::ml::KNearest> knn =
+		cv::ml::KNearest::create();
+	knn->train(tdata);
+
+	cv::Mat input = img;
+	objectFeatures thisFeature = ComputeFeatures(input);
+
+	cv::Mat exData(1, 2, CV_32FC1);
+	exData.at<float>(0, 1) = thisFeature.compactness;//4
+	exData.at<float>(0, 0) = thisFeature.hue;
+
+	int r = knn->findNearest(
+		exData, K, result, neighbor, dist);
+
+	string red = "Jelly Red";
+	string green = "Jelly Green";
+	string violet = "Jelly Violet";
+	string none = "None";
+
+	//cout << r << endl;
+	if (r == 1)
+	{
+		//cout << "result : " << "jellyRed" << endl;
+		return red;
+	}
+	else if (r == 2)
+	{
+		//cout << "result : " << "jellyGreen" << endl;
+		return green;
+	}
+	else if (r == 3)
+	{
+		//cout << "result : " << "jellyViolet" << endl;
+		return violet;
+	}else
+	{
+		return none;
+	}
+
+	//for (int i = 0; i < K; i++)
+	//{
+	//	cout << i << " : "
+	//		<< neighbor.at<float>(0, i) << " , "
+	//		<< dist.at<float>(0, i)
+	//		<< endl;
+	//}
+}
+
+
+void FeaturesMode() {
+	string input_filename = PATH_CSV;
+
+	std::ifstream openfile(input_filename, ios::in);
+	if (!openfile) //Always test the file open.
+	{
+		cout << "Error opening output file" << endl;
+		system("pause");
+	}
+	else
+	{
+		cout << "Opening input file completed" << endl;
+	}
+
+	cv::Ptr<cv::ml::TrainData> tdata;
+	tdata->create;
+	tdata = cv::ml::TrainData::loadFromCSV(PATH_CSV,0, 0, 1);
+
+
+	int K = 5;
+	cv::Mat result(1, 1, CV_32FC1);
+	cv::Mat neighbor(1, 5, CV_32FC1);
+	cv::Mat dist(1, 5, CV_32FC1);
+
+
+	cv::Ptr<cv::ml::KNearest> knn =
+		cv::ml::KNearest::create();
+	knn->train(tdata);
+
+	cv::Mat img_features(500, 500, CV_8UC3);
+	for (int i = 0; i < img_features.rows; i++)
+	{
+		for (int j = 0; j < img_features.cols; j++)
+		{
+			cv::Mat testData(1, 2, CV_32FC1);
+			float response;
+			testData.at<float>(0, 0) = float(j / 500.0);
+			testData.at<float>(0, 1) = float(i / 500.0);
+
+			response = knn->findNearest(testData, K, result);
+
+			if (response == 1)
+			{
+				img_features.at<cv::Vec3b>(i, j) = cv::Vec3b(0, 0, 200);
+			}
+			else if (response == 2)
+			{
+				img_features.at<cv::Vec3b>(i, j) = cv::Vec3b(0,150, 0);
+			}
+			else if (response == 3)
+			{
+				img_features.at<cv::Vec3b>(i, j) = cv::Vec3b(150, 0, 150);
+			}
+		}
+	}
+
+	cv::Mat TrainFeatures = tdata->getTrainSamples();
+	cv::Mat trainLabels = tdata->getTrainResponses();
+
+	for (int i = 0; i < trainLabels.rows; i++)
+	{
+		cv::Scalar color;
+		int lb_type = trainLabels.at<float>(i, 0);
+		if (lb_type == 1)
+		{
+			color = CV_RGB(255, 0, 0);
+			cv::putText(img_features, "1", cv::Point(TrainFeatures.at<float>(i, 0) * 500, TrainFeatures.at<float>(i, 1) * 500), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 0, 0), 1);
+		}
+		else if (lb_type == 2)
+		{
+			color = CV_RGB(0, 255, 0);
+			cv::putText(img_features, "2", cv::Point(TrainFeatures.at<float>(i, 0) * 500, TrainFeatures.at<float>(i, 1) * 500), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 0, 0), 1);
+		}
+		else if (lb_type == 3)
+		{
+			color = CV_RGB(255, 0, 255);
+			cv::putText(img_features, "3", cv::Point(TrainFeatures.at<float>(i, 0) * 500, TrainFeatures.at<float>(i, 1) * 500), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 0, 0), 1);
+		}
+		cv::circle(img_features, cv::Point(TrainFeatures.at<float>(i, 0) * 500, TrainFeatures.at<float>(i, 1) * 500), 2, color, 2);
+		
+	}
+
+	cv::namedWindow("feature space");
+	cv::imshow("feature space", img_features);
+	cv::waitKey();
+}
+
+int Cap_model() {
+	cv::VideoCapture cap(0);
+
+	// Check if camera opened successfully
+	if (!cap.isOpened()) {
+		cout << "Error opening video stream or file" << endl;
+		return -1;
+	}
+
+	int num_r = 0;
+	int num_g = 0;
+	int num_v = 0;
+	int num_o = 0;
+	int num_t = 0;
+	string f_name = "picture_";
+	while (1) {
+
+		cv::Mat frame;
+		// Capture frame-by-frame
+		cap >> frame;
+
+		// Display the resulting frame
+		cv::imshow("Frame", frame);
+
+		// Press  ESC on keyboard to exit
+		char q = (char)cv::waitKey(1);
+		if (q == 113) {
+			break;
+		}
+
+		char a = (char)cv::waitKey(25);
+		if (a == 114) {
+			num_r = num_r + 1;
+			stringstream ss;
+			ss << num_r;
+			string num_str = ss.str();
+			string flie_path = PATH_CAP_MODEL_RED + num_str + ".jpg";
+			cv::imwrite(flie_path, frame);
+			cout << "Path : " << flie_path << "\n";
+		}
+		char b = (char)cv::waitKey(25);
+		if (b == 103) {
+			num_g = num_g + 1;
+			stringstream ss;
+			ss << num_g;
+			string num_str = ss.str();
+			string flie_path = PATH_CAP_MODEL_GREEN + num_str + ".jpg";
+			cv::imwrite(flie_path, frame);
+			cout << "Path : " << flie_path << "\n";
+		}
+		char c = (char)cv::waitKey(25);
+		if (c == 118) {
+			num_v = num_v + 1;
+			stringstream ss;
+			ss << num_v;
+			string num_str = ss.str();
+			string flie_path = PATH_CAP_MODEL_VIOLET + num_str + ".jpg";
+			cv::imwrite(flie_path, frame);
+			cout << "Path : " << flie_path << "\n";
+		}
+
+		char t = (char)cv::waitKey(25);
+		if (t == 116) {
+			num_t = num_t + 1;
+			stringstream ss;
+			ss << num_t;
+			string num_str = ss.str();
+			string flie_path = "D:\\59360624\\Computer Vision\\img\\fruits\\test\\v_" + num_str + ".jpg";
+			cv::imwrite(flie_path, frame);
+			cout << "Path : " << flie_path << "\n";
+		}
+
+	}
+
+	// When everything done, release the video capture object
+	cap.release();
+
+	// Closes all the frames
+	cv::destroyAllWindows();
+
+	return 0;
+}
+
+
+int reltime_detection()
+{
+
+	cv::VideoCapture cap(0);
+
+
+	if (!cap.isOpened()) {
+		cout << "Error opening video stream or file" << endl;
+		return -1;
+	}
+
+	cv::Mat background = cv::imread(PATH_BG);
+	cv::flip(background, background, 1);
+
+	//cv::namedWindow("Control", cv::WINDOW_AUTOSIZE);
+
+	//int itest1 = 0;
+	//int itest2 = 0;
+
+	//cv::createTrackbar("test01", "Control", &itest1, 255);
+	//cv::createTrackbar("test02", "Control", &itest2, 255);
+
+	while (true)
+	{
+		cv::Mat frame;
+		// Capture frame-by-frame
+		cap >> frame;
+
+		// กลับภาพเพื่อให้ดูเข้าใจง่ายไม่สับสน
+		cv::flip(frame, frame, 1);
+
+		//เบลอภาพ แล้วแปลงเป็น hsv
+		cv::Mat hsv;
+		cv::Mat blur;
+		cv::medianBlur(frame, blur, 9);//101
+		cv::cvtColor(blur, hsv, cv::COLOR_BGR2HSV);
+
+		cv::Mat mask1, mask2, mask3, b_g;
+		// Creating masks to detect the upper and lower red color.
+		cv::inRange(hsv, cv::Scalar(0, 120, 70), cv::Scalar(10, 255, 255), mask1);
+		cv::inRange(hsv, cv::Scalar(40, 111, 0), cv::Scalar(70, 255, 255), mask2);
+		cv::inRange(hsv, cv::Scalar(90, 20, 0), cv::Scalar(255, 255, 80), mask3);
+	    //backgroud 
+		cv::inRange(hsv, cv::Scalar(170, 120, 70), cv::Scalar(180, 255, 255), b_g);
+
+		//Count object
+		int compact_min = 600;
+		int compact = 20;
+
+		cv::Mat kernel_r = cv::Mat::ones(compact, compact, CV_32F);
+		morphologyEx(mask1, mask1, cv::MORPH_OPEN, kernel_r);
+		morphologyEx(mask1, mask1, cv::MORPH_DILATE, kernel_r);
+
+		cv::Mat kernel_g = cv::Mat::ones(compact, compact, CV_32F);
+		morphologyEx(mask2, mask2, cv::MORPH_OPEN, kernel_g);
+		morphologyEx(mask2, mask2, cv::MORPH_DILATE, kernel_g);
+
+		cv::Mat kernel_v = cv::Mat::ones(compact, compact, CV_32F);
+		morphologyEx(mask3, mask3, cv::MORPH_OPEN, kernel_v);
+		morphologyEx(mask3, mask3, cv::MORPH_DILATE, kernel_v);
+
+		vector<vector<cv::Point>> contours_r, contours_g, contours_b;
+		int	count_r, count_g, count_v;
+		cv::Mat r_zero, g_zero, v_zero;
+		cv::Rect rect_r, rect_g, rect_b;
+		cv::findContours(mask1, contours_r, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+		int num_r = static_cast<int>(contours_r.size());
+		stringstream ss_r, ss_g, ss_v;
+		ss_r << num_r;
+		string str_r = "red : " + ss_r.str();
+
+		cv::findContours(mask2, contours_g, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+		int num_g = static_cast<int>(contours_g.size());
+		ss_g << num_g;
+		string str_g = "green : " + ss_g.str();
+
+		cv::findContours(mask3, contours_b, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+		int num_v = static_cast<int>(contours_b.size());
+		ss_v << num_v;
+		string str_v = "violet : " + ss_v.str();
+
+		//Check Knn 
+		cv::Mat result_r,result_g,result_v;
+
+		// Generating the final mask
+	    result_r = mask2 + mask3 + b_g;
+		result_g = mask1 + mask3 + b_g;
+		result_v = mask1 + mask2 + b_g;
+
+		//RED
+		cv::bitwise_not(result_r, b_g);
+		cv::Mat res1, res2, output_r;
+		cv::bitwise_and(frame, frame, res1, b_g);
+		cv::bitwise_and(background, background, res2, result_r);
+		cv::addWeighted(res1, 1, res2, 1, 0, output_r);
+
+		//GREEN
+		cv::bitwise_not(result_g, b_g);
+		cv::Mat res3, res4, output_g;
+		cv::bitwise_and(frame, frame, res3, b_g);
+		cv::bitwise_and(background, background, res4, result_g);
+		cv::addWeighted(res3, 1, res4, 1, 0, output_g);
+
+		//VIOLET
+		cv::bitwise_not(result_v, b_g);
+		cv::Mat res5, res6, output_v;
+		cv::bitwise_and(frame, frame, res5, b_g);
+		cv::bitwise_and(background, background, res6, result_v);
+		cv::addWeighted(res5, 1, res6, 1, 0, output_v);
+
+		if (num_r >= 1 ) {
+			if (test_img(output_r) == "Jelly Red")
+			{
+				cv::putText(frame, str_r, cv::Point(50, 20), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 0, 255), 2);
+				for (int i = 0; i < contours_r.size(); i++)
+				{
+					if ((contourArea(contours_r[i], false)) > compact_min) {
+						rect_r = boundingRect(contours_r[i]);
+						cv::rectangle(frame, rect_r, cv::Scalar(0, 0, 255), 2, 8, 0);
+					}
+				}
+			}
+		}
+
+		if (num_g >= 1 )
+		{
+			if (test_img(output_g) == "Jelly Green")
+			{
+				cv::putText(frame, str_g, cv::Point(120, 20), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 2);
+				for (int i = 0; i < contours_g.size(); i++)
+				{
+					if ((contourArea(contours_g[i], false)) > compact_min) {
+						rect_g = boundingRect(contours_g[i]);
+						cv::rectangle(frame, rect_g, cv::Scalar(0, 255, 0), 2, 8, 0);
+					}
+				}
+			}
+		}
+
+		if (num_v >= 1) {
+			if (test_img(output_v) == "Jelly Violet")
+			{
+				cv::putText(frame, str_v, cv::Point(210, 20), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 0, 0), 2);
+				for (int i = 0; i < contours_b.size(); i++)
+				{
+					if ((contourArea(contours_b[i], false)) > compact_min) {
+						rect_b = boundingRect(contours_b[i]);
+						cv::rectangle(frame, rect_b, cv::Scalar(255, 0, 0), 2, 8, 0);
+					}
+				}
+
+			}
+		}
+
+
+		cv::imshow("frame",frame);
+		//cv::imshow("mask1", mask1);
+		//cv::imshow("mask2", mask2);
+		//cv::imshow("mask3", mask3);
+		//cv::imshow("output1", output_r);
+		//cv::imshow("output2", output_g);
+		//cv::imshow("output3", output_v);
+
+		char a = (char)cv::waitKey(1); char q = (char)cv::waitKey(1);
+
+		if (a == 115) {
+			string flie_path = PATH_BG;
+			cv::imwrite(flie_path, frame);
+			cout << "Path : " << flie_path << "\n";
+		}else if (q == 118) {
+			break;
+		}
+	}
+
+	cap.release();
+	cv::destroyAllWindows();
+}
+
+int main()
+{
+	if (MODE == 0) {
+		Cap_model();
+	}
+	else if (MODE == 1)
+	{
+		TrainMode();
+	}
+	else if (MODE == 2)
+	{
+		FeaturesMode();
+
+	}
+	else if (MODE == 3)
+	{
+		reltime_detection();
+	}
+	system("pause");
+	return 0;
+}
